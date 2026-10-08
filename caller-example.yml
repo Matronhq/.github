@@ -1,0 +1,11 @@
+# Copy to .github/workflows/leak-check.yml in each repository.
+name: leak-check
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  push:
+    branches: [main, master]
+jobs:
+  leak-check:
+    uses: Matronhq/.github/.github/workflows/leak-check.yml@main
+    secrets: inherit

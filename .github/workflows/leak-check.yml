@@ -1,0 +1,29 @@
+# Reusable: fail a change that adds private context to a public repository.
+# Callers: `uses: Matronhq/.github/.github/workflows/leak-check.yml@main`
+# with `secrets: inherit` (the patterns are the org secret LEAK_PATTERNS).
+name: leak-check
+on:
+  workflow_call:
+    secrets:
+      LEAK_PATTERNS:
+        required: false
+permissions:
+  contents: read
+jobs:
+  leak-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/checkout@v4
+        with:
+          repository: Matronhq/.github
+          path: .leak-check
+          sparse-checkout: scripts/leak_check.py
+          sparse-checkout-cone-mode: false
+      - name: Check for private context
+        env:
+          LEAK_PATTERNS: ${{ secrets.LEAK_PATTERNS }}
+        run: python3 .leak-check/scripts/leak_check.py
