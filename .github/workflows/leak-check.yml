@@ -1,12 +1,15 @@
 # Reusable: fail a change that adds private context to a public repository.
 # Callers: `uses: Matronhq/.github/.github/workflows/leak-check.yml@main`
-# with `secrets: inherit` (the patterns are the org secret LEAK_PATTERNS).
+# with `secrets: { LEAK_PATTERNS: ${{ secrets.LEAK_PATTERNS }} }`, triggered by
+# `pull_request_target` (so fork pull requests get the patterns too) and
+# `push`. The pull request's code is only read as data (git diff), never run:
+# the checker comes from this repository.
 name: leak-check
 on:
   workflow_call:
     secrets:
       LEAK_PATTERNS:
-        required: false
+        required: true
 permissions:
   contents: read
 jobs:
@@ -16,11 +19,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          # A pull request's head (forks included) is refs/pull/N/head in the
+          # base repository; a push checks out what was pushed.
+          ref: ${{ github.event.pull_request && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
       - uses: actions/checkout@v4
         with:
           repository: Matronhq/.github
           path: .leak-check
+          persist-credentials: false
           sparse-checkout: scripts/leak_check.py
           sparse-checkout-cone-mode: false
       - name: Check for private context

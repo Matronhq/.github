@@ -95,8 +95,10 @@ def main():
             return 2
         return scan_tree(patterns, "--show" in sys.argv)
     if not patterns:
-        print("::warning::LEAK_PATTERNS is not available to this run (a fork, or the secret is unset); nothing checked")
-        return 0
+        # Fail closed: a check that silently scanned nothing would read as a pass.
+        print("::error::LEAK_PATTERNS is empty or unavailable to this run, so nothing could be checked."
+              " Callers must pass the organisation secret and run on pull_request_target or push.")
+        return 1
     event = json.load(open(os.environ["GITHUB_EVENT_PATH"]))
     allow = load_allow()
     texts = []  # (where, text)
