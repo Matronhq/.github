@@ -16,14 +16,19 @@ jobs:
   leak-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
           # A pull request's head (forks included) is refs/pull/N/head in the
           # base repository; a push checks out what was pushed.
           ref: ${{ github.event.pull_request && format('refs/pull/{0}/head', github.event.pull_request.number) || github.sha }}
-      - uses: actions/checkout@v4
+          # Safe here: the checked-out files are only read with git diff and
+          # matched against the patterns. Nothing from the pull request is
+          # executed, the token is read-only and not persisted, and the
+          # checker itself comes from this repository.
+          allow-unsafe-pr-checkout: true
+      - uses: actions/checkout@v7
         with:
           repository: Matronhq/.github
           path: .leak-check
