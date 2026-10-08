@@ -9,6 +9,9 @@ would put it in a public Actions log.
 Scanned: lines added by the change, file names, commit messages, and for a
 pull request its title and description. Paths listed in .leakcheck-allow
 (fnmatch globs, one per line) are skipped for file content.
+
+Locally, `LEAK_PATTERNS="$(cat patterns.txt)" leak_check.py --tree [--show]`
+scans every tracked file instead.
 """
 import fnmatch
 import json
@@ -57,8 +60,40 @@ def added_lines(base, head):
             line_no += 1
 
 
+def scan_tree(patterns, show):
+    """Local use: every tracked file at HEAD. `show` prints the matched text
+    too (never do that in a public log)."""
+    allow = load_allow()
+    total = 0
+    for path in git("ls-files").splitlines():
+        if any(fnmatch.fnmatch(path, g) for g in allow):
+            continue
+        for n, rx in patterns:
+            if rx.search(path):
+                total += 1
+                print(f"{path}: file name, rule line {n}")
+        try:
+            with open(path, encoding="utf-8") as f:
+                lines = f.readlines()
+        except (UnicodeDecodeError, IsADirectoryError, FileNotFoundError):
+            continue
+        for i, text in enumerate(lines, 1):
+            for n, rx in patterns:
+                m = rx.search(text)
+                if m:
+                    total += 1
+                    print(f"{path}:{i}: rule line {n}" + (f": {m.group(0)!r} in {text.strip()[:160]}" if show else ""))
+    print(f"{total} hit(s)")
+    return 1 if total else 0
+
+
 def main():
     patterns = load_patterns(os.environ.get("LEAK_PATTERNS", ""))
+    if "--tree" in sys.argv:
+        if not patterns:
+            print("LEAK_PATTERNS is empty")
+            return 2
+        return scan_tree(patterns, "--show" in sys.argv)
     if not patterns:
         print("::warning::LEAK_PATTERNS is not available to this run (a fork, or the secret is unset); nothing checked")
         return 0
