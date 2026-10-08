@@ -8,7 +8,9 @@ would put it in a public Actions log.
 
 Scanned: lines added by the change, file names, commit messages, and for a
 pull request its title and description. Paths listed in .leakcheck-allow
-(fnmatch globs, one per line) are skipped for file content.
+(fnmatch globs, one per line, read from the BASE commit so a change cannot
+exempt itself) are skipped for file content. New images and videos only
+warn: no pattern can read them, so they need a look by eye.
 
 Locally, `LEAK_PATTERNS="$(cat patterns.txt)" leak_check.py --tree [--show]`
 scans every tracked file instead.
@@ -38,11 +40,20 @@ def load_patterns(raw):
     return out
 
 
-def load_allow(path=".leakcheck-allow"):
-    if not os.path.exists(path):
+def load_allow(ref=None, path=".leakcheck-allow"):
+    """Exclusion globs. For a change, read them from the base commit, so a
+    pull request can never widen its own exclusions; locally, from the tree."""
+    if ref:
+        try:
+            text = git("show", f"{ref}:{path}")
+        except subprocess.CalledProcessError:
+            return []
+    elif os.path.exists(path):
+        with open(path) as f:
+            text = f.read()
+    else:
         return []
-    with open(path) as f:
-        return [l.strip() for l in f if l.strip() and not l.startswith("#")]
+    return [l.strip() for l in text.splitlines() if l.strip() and not l.startswith("#")]
 
 
 def added_lines(base, head):
@@ -100,7 +111,6 @@ def main():
               " Callers must pass the organisation secret and run on pull_request_target or push.")
         return 1
     event = json.load(open(os.environ["GITHUB_EVENT_PATH"]))
-    allow = load_allow()
     texts = []  # (where, text)
     pr = event.get("pull_request")
     if pr:
@@ -115,6 +125,7 @@ def main():
         texts.append((f"commit {sha[:10]} message", git("log", "-1", "--format=%B", sha)))
     for path in git("diff", "--name-only", f"{base}...{head}").splitlines():
         texts.append(("file name", path))
+    allow = load_allow(base)
 
     hits = []
     # Commit identities only warn: they come from each machine's git config,
