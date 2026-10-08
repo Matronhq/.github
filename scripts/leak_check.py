@@ -8,7 +8,8 @@ would put it in a public Actions log.
 
 Scanned: lines added by the change, file names, commit messages, and for a
 pull request its title and description. Co-authored-by and Signed-off-by
-lines count as commit identity, which only warns. Paths listed in .leakcheck-allow
+lines naming a GitHub noreply address count as commit identity, which only
+warns. Paths listed in .leakcheck-allow
 (fnmatch globs, one per line, read from the BASE commit so a change cannot
 exempt itself) are skipped for file content. New images and videos only
 warn: no pattern can read them, so they need a look by eye.
@@ -24,7 +25,13 @@ import subprocess
 import sys
 
 
-CREDIT_LINE = re.compile(r"^\s*(co-authored-by|signed-off-by):", re.I)
+# Only GitHub's own credit lines count as identity: a plain name (letters,
+# spaces, . ' -) and a users.noreply.github.com address, nothing else on the
+# line, so the exempt part can hold no more than the commit author field does. Any other
+# co-author or sign-off line is scanned like the rest of the message.
+CREDIT_LINE = re.compile(
+    r"^\s*(co-authored-by|signed-off-by): [A-Za-z][A-Za-z .'-]{0,59} <[0-9]+\+[A-Za-z0-9-]+@users\.noreply\.github\.com>\s*$",
+    re.I)
 
 
 def git(*args):
