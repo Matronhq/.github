@@ -7,7 +7,8 @@ reported by pattern number and location only: printing the matched text
 would put it in a public Actions log.
 
 Scanned: lines added by the change, file names, commit messages, and for a
-pull request its title and description. Paths listed in .leakcheck-allow
+pull request its title and description. Co-authored-by and Signed-off-by
+lines count as commit identity, which only warns. Paths listed in .leakcheck-allow
 (fnmatch globs, one per line, read from the BASE commit so a change cannot
 exempt itself) are skipped for file content. New images and videos only
 warn: no pattern can read them, so they need a look by eye.
@@ -21,6 +22,9 @@ import os
 import re
 import subprocess
 import sys
+
+
+CREDIT_LINE = re.compile(r"^\s*(co-authored-by|signed-off-by):", re.I)
 
 
 def git(*args):
@@ -121,17 +125,24 @@ def main():
         base, head = event.get("before"), event.get("after")
         if not base or set(base) == {"0"}:
             base = git("rev-list", "--max-parents=0", head).split()[0]
+    credits = {}  # sha -> co-author/sign-off lines, judged like the commit identity
     for sha in git("rev-list", f"{base}..{head}").split():
-        texts.append((f"commit {sha[:10]} message", git("log", "-1", "--format=%B", sha)))
+        body = []
+        for line in git("log", "-1", "--format=%B", sha).splitlines():
+            if CREDIT_LINE.match(line):
+                credits.setdefault(sha, []).append(line)
+            else:
+                body.append(line)
+        texts.append((f"commit {sha[:10]} message", "\n".join(body)))
     for path in git("diff", "--name-only", f"{base}...{head}").splitlines():
         texts.append(("file name", path))
     allow = load_allow(base)
 
     hits = []
     # Commit identities only warn: they come from each machine's git config,
-    # not from what the change says.
+    # or from GitHub's squash-merge co-author lines, not from what the change says.
     for sha in git("rev-list", f"{base}..{head}").split():
-        ident = git("log", "-1", "--format=%an <%ae> / %cn <%ce>", sha)
+        ident = "\n".join([git("log", "-1", "--format=%an <%ae> / %cn <%ce>", sha)] + credits.get(sha, []))
         if any(rx.search(ident) for _, rx in patterns):
             print(f"::warning::commit {sha[:10]}: author or committer identity matches a private pattern")
     for where, text in texts:
