@@ -8,8 +8,13 @@ would put it in a public Actions log.
 
 Scanned: lines added by the change, file names, commit messages, and for a
 pull request its title and description. Co-authored-by and Signed-off-by
-lines naming a GitHub noreply address count as commit identity, which only
-warns. Paths listed in .leakcheck-allow
+lines naming a GitHub noreply address count as commit identity: a match
+against the patterns only warns, because the account's public name is
+expected there. Two identity rules fail on their own, without the patterns:
+an address on a machine-local domain (`user@host.local`, `.localdomain`,
+`.lan`, `.internal`, or no domain at all) anywhere, and, on a pull request
+from a branch of the repository itself, any address that is not a noreply
+one (see NOREPLY), since a box's own mail domain says where it runs. Paths listed in .leakcheck-allow
 (fnmatch globs, one per line, read from the BASE commit so a change cannot
 exempt itself) are skipped for file content. New images and videos only
 warn: no pattern can read them, so they need a look by eye.
@@ -34,8 +39,63 @@ CREDIT_LINE = re.compile(
     re.I)
 
 
+# An identity address on a domain only a machine knows: a git default built
+# from the login and host name, which names the computer it was made on.
+MACHINE_LOCAL = re.compile(
+    r"@(?:[^@>\s]*\.)?(?:local|localdomain|lan|internal|home|home\.arpa|localhost)$|@[^.@>\s]+$", re.I)
+
+# Addresses that say nothing about where a commit was made.
+NOREPLY = re.compile(
+    r"(?:@users\.noreply\.github\.com|^noreply@github\.com|^support@github\.com"
+    r"|^noreply@anthropic\.com|^noreply@openai\.com)$", re.I)
+
+IDENTITY_LINE = re.compile(r"<([^<>\s]+)>\s*$")
+CREDIT_KEY = re.compile(r"^\s*(co-authored-by|signed-off-by)\s*:", re.I)
+
+
+def identity_problems(idents, own_branch):
+    """Errors for (label, address) pairs: machine-local always, and any
+    non-noreply address when the change comes from the repository itself."""
+    out = []
+    for label, addr in idents:
+        if MACHINE_LOCAL.search(addr):
+            out.append(f"{label} uses a machine-local address; set user.email to the account's noreply address")
+        elif own_branch and not NOREPLY.search(addr):
+            out.append(f"{label} is not a noreply address; set user.email to the account's noreply address")
+    return out
+
+
 def git(*args):
     return subprocess.run(["git", *args], check=True, capture_output=True, text=True, errors="replace").stdout
+
+
+def has_commit(sha):
+    return subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], capture_output=True).returncode == 0
+
+
+def present_base(base, base_ref, head):
+    """The event's base commit, or the nearest stand-in the checkout has. A
+    pull request event can name a base the clone never fetched (the base
+    branch moved on, or the base was rebased away); rather than crash, fetch
+    it, and failing that diff from where the head left the base branch."""
+    if has_commit(base):
+        return base
+    subprocess.run(["git", "fetch", "-q", "--no-tags", "origin", base], capture_output=True)
+    if has_commit(base):
+        return base
+    if base_ref:
+        # Fetch into a ref of our own and use it only if the fetch worked:
+        # after a failed fetch FETCH_HEAD can still name the pull request's
+        # head, which would make the range empty and pass unchecked.
+        fetched = subprocess.run(["git", "fetch", "-q", "--no-tags", "origin",
+                                  f"+refs/heads/{base_ref}:refs/leak-check/base"], capture_output=True)
+        if fetched.returncode != 0:
+            return base
+        mb = subprocess.run(["git", "merge-base", "refs/leak-check/base", head], capture_output=True, text=True)
+        if mb.returncode == 0 and mb.stdout.strip():
+            print(f"::warning::base commit {base[:10]} is not in the checkout; checking from the merge base with {base_ref}")
+            return mb.stdout.strip()
+    return base
 
 
 def load_patterns(raw):
@@ -126,6 +186,11 @@ def main():
     pr = event.get("pull_request")
     if pr:
         base, head = pr["base"]["sha"], pr["head"]["sha"]
+        base = present_base(base, pr["base"].get("ref"), head)
+        if not has_commit(base):
+            # Fail closed: without the base there is no range to check.
+            print(f"::error::base commit {base[:10]} could not be fetched, so the change could not be checked")
+            return 1
         texts.append(("PR title", pr.get("title") or ""))
         texts.append(("PR description", pr.get("body") or ""))
     else:
@@ -146,12 +211,30 @@ def main():
     allow = load_allow(base)
 
     hits = []
-    # Commit identities only warn: they come from each machine's git config,
+    # Commit identities matching the patterns only warn: they come from each machine's git config,
     # or from GitHub's squash-merge co-author lines, not from what the change says.
+    # A pull request from a branch of this repository is the organisation's
+    # own work, so its identities must be noreply ones; a fork's contributor
+    # chooses their own address.
+    own_branch = bool(pr) and (pr["head"].get("repo") or {}).get("full_name") == (pr["base"].get("repo") or {}).get("full_name")
     for sha in git("rev-list", f"{base}..{head}").split():
         ident = "\n".join([git("log", "-1", "--format=%an <%ae> / %cn <%ce>", sha)] + credits.get(sha, []))
         if any(rx.search(ident) for _, rx in patterns):
             print(f"::warning::commit {sha[:10]}: author or committer identity matches a private pattern")
+        idents = [("author", git("log", "-1", "--format=%ae", sha).strip()),
+                  ("committer", git("log", "-1", "--format=%ce", sha).strip())]
+        # Credit lines anywhere in the message (a squash merge copies them
+        # into its body), plus git's own parse of the trailer block, which
+        # unfolds continuation lines and allows space before the colon.
+        lines = git("log", "-1", "--format=%B", sha).splitlines()
+        lines += git("log", "-1", "--format=%(trailers:only,unfold)", sha).splitlines()
+        for line in lines:
+            if CREDIT_KEY.match(line):
+                m = IDENTITY_LINE.search(line)
+                if m:
+                    idents.append(("co-author or sign-off line", m.group(1)))
+        for problem in identity_problems(list(dict.fromkeys(idents)), own_branch):
+            hits.append(f"commit {sha[:10]}: {problem}")
     for where, text in texts:
         for n, rx in patterns:
             if rx.search(text):
