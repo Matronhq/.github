@@ -68,6 +68,29 @@ def git(*args):
     return subprocess.run(["git", *args], check=True, capture_output=True, text=True, errors="replace").stdout
 
 
+def has_commit(sha):
+    return subprocess.run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], capture_output=True).returncode == 0
+
+
+def present_base(base, base_ref, head):
+    """The event's base commit, or the nearest stand-in the checkout has. A
+    pull request event can name a base the clone never fetched (the base
+    branch moved on, or the base was rebased away); rather than crash, fetch
+    it, and failing that diff from where the head left the base branch."""
+    if has_commit(base):
+        return base
+    subprocess.run(["git", "fetch", "-q", "--no-tags", "origin", base], capture_output=True)
+    if has_commit(base):
+        return base
+    if base_ref:
+        subprocess.run(["git", "fetch", "-q", "--no-tags", "origin", base_ref], capture_output=True)
+        mb = subprocess.run(["git", "merge-base", "FETCH_HEAD", head], capture_output=True, text=True)
+        if mb.returncode == 0 and mb.stdout.strip():
+            print(f"::warning::base commit {base[:10]} is not in the checkout; checking from the merge base with {base_ref}")
+            return mb.stdout.strip()
+    return base
+
+
 def load_patterns(raw):
     out = []
     for n, line in enumerate(raw.splitlines(), 1):
@@ -156,6 +179,7 @@ def main():
     pr = event.get("pull_request")
     if pr:
         base, head = pr["base"]["sha"], pr["head"]["sha"]
+        base = present_base(base, pr["base"].get("ref"), head)
         texts.append(("PR title", pr.get("title") or ""))
         texts.append(("PR description", pr.get("body") or ""))
     else:
