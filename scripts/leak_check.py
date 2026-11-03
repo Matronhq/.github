@@ -50,6 +50,7 @@ NOREPLY = re.compile(
     r"|^noreply@anthropic\.com|^noreply@openai\.com)$", re.I)
 
 IDENTITY_LINE = re.compile(r"<([^<>\s]+)>\s*$")
+CREDIT_KEY = re.compile(r"^\s*(co-authored-by|signed-off-by)\s*:", re.I)
 
 
 def identity_problems(idents, own_branch):
@@ -83,8 +84,14 @@ def present_base(base, base_ref, head):
     if has_commit(base):
         return base
     if base_ref:
-        subprocess.run(["git", "fetch", "-q", "--no-tags", "origin", base_ref], capture_output=True)
-        mb = subprocess.run(["git", "merge-base", "FETCH_HEAD", head], capture_output=True, text=True)
+        # Fetch into a ref of our own and use it only if the fetch worked:
+        # after a failed fetch FETCH_HEAD can still name the pull request's
+        # head, which would make the range empty and pass unchecked.
+        fetched = subprocess.run(["git", "fetch", "-q", "--no-tags", "origin",
+                                  f"+refs/heads/{base_ref}:refs/leak-check/base"], capture_output=True)
+        if fetched.returncode != 0:
+            return base
+        mb = subprocess.run(["git", "merge-base", "refs/leak-check/base", head], capture_output=True, text=True)
         if mb.returncode == 0 and mb.stdout.strip():
             print(f"::warning::base commit {base[:10]} is not in the checkout; checking from the merge base with {base_ref}")
             return mb.stdout.strip()
@@ -180,6 +187,10 @@ def main():
     if pr:
         base, head = pr["base"]["sha"], pr["head"]["sha"]
         base = present_base(base, pr["base"].get("ref"), head)
+        if not has_commit(base):
+            # Fail closed: without the base there is no range to check.
+            print(f"::error::base commit {base[:10]} could not be fetched, so the change could not be checked")
+            return 1
         texts.append(("PR title", pr.get("title") or ""))
         texts.append(("PR description", pr.get("body") or ""))
     else:
@@ -212,12 +223,17 @@ def main():
             print(f"::warning::commit {sha[:10]}: author or committer identity matches a private pattern")
         idents = [("author", git("log", "-1", "--format=%ae", sha).strip()),
                   ("committer", git("log", "-1", "--format=%ce", sha).strip())]
-        for line in git("log", "-1", "--format=%B", sha).splitlines():
-            if re.match(r"^\s*(co-authored-by|signed-off-by):", line, re.I):
+        # Credit lines anywhere in the message (a squash merge copies them
+        # into its body), plus git's own parse of the trailer block, which
+        # unfolds continuation lines and allows space before the colon.
+        lines = git("log", "-1", "--format=%B", sha).splitlines()
+        lines += git("log", "-1", "--format=%(trailers:only,unfold)", sha).splitlines()
+        for line in lines:
+            if CREDIT_KEY.match(line):
                 m = IDENTITY_LINE.search(line)
                 if m:
                     idents.append(("co-author or sign-off line", m.group(1)))
-        for problem in identity_problems(idents, own_branch):
+        for problem in identity_problems(list(dict.fromkeys(idents)), own_branch):
             hits.append(f"commit {sha[:10]}: {problem}")
     for where, text in texts:
         for n, rx in patterns:
