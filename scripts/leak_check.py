@@ -8,8 +8,13 @@ would put it in a public Actions log.
 
 Scanned: lines added by the change, file names, commit messages, and for a
 pull request its title and description. Co-authored-by and Signed-off-by
-lines naming a GitHub noreply address count as commit identity, which only
-warns. Paths listed in .leakcheck-allow
+lines naming a GitHub noreply address count as commit identity: a match
+against the patterns only warns, because the account's public name is
+expected there. Two identity rules fail on their own, without the patterns:
+an address on a machine-local domain (`user@host.local`, `.localdomain`,
+`.lan`, `.internal`, or no domain at all) anywhere, and, on a pull request
+from a branch of the repository itself, any address that is not a noreply
+one (see NOREPLY), since a box's own mail domain says where it runs. Paths listed in .leakcheck-allow
 (fnmatch globs, one per line, read from the BASE commit so a change cannot
 exempt itself) are skipped for file content. New images and videos only
 warn: no pattern can read them, so they need a look by eye.
@@ -32,6 +37,31 @@ import sys
 CREDIT_LINE = re.compile(
     r"^\s*(co-authored-by|signed-off-by): [A-Za-z][A-Za-z .'-]{0,59} <[0-9]+\+[A-Za-z0-9-]+@users\.noreply\.github\.com>\s*$",
     re.I)
+
+
+# An identity address on a domain only a machine knows: a git default built
+# from the login and host name, which names the computer it was made on.
+MACHINE_LOCAL = re.compile(
+    r"@(?:[^@>\s]*\.)?(?:local|localdomain|lan|internal|home|home\.arpa|localhost)$|@[^.@>\s]+$", re.I)
+
+# Addresses that say nothing about where a commit was made.
+NOREPLY = re.compile(
+    r"(?:@users\.noreply\.github\.com|^noreply@github\.com|^support@github\.com"
+    r"|^noreply@anthropic\.com|^noreply@openai\.com)$", re.I)
+
+IDENTITY_LINE = re.compile(r"<([^<>\s]+)>\s*$")
+
+
+def identity_problems(idents, own_branch):
+    """Errors for (label, address) pairs: machine-local always, and any
+    non-noreply address when the change comes from the repository itself."""
+    out = []
+    for label, addr in idents:
+        if MACHINE_LOCAL.search(addr):
+            out.append(f"{label} uses a machine-local address; set user.email to the account's noreply address")
+        elif own_branch and not NOREPLY.search(addr):
+            out.append(f"{label} is not a noreply address; set user.email to the account's noreply address")
+    return out
 
 
 def git(*args):
@@ -146,12 +176,25 @@ def main():
     allow = load_allow(base)
 
     hits = []
-    # Commit identities only warn: they come from each machine's git config,
+    # Commit identities matching the patterns only warn: they come from each machine's git config,
     # or from GitHub's squash-merge co-author lines, not from what the change says.
+    # A pull request from a branch of this repository is the organisation's
+    # own work, so its identities must be noreply ones; a fork's contributor
+    # chooses their own address.
+    own_branch = bool(pr) and (pr["head"].get("repo") or {}).get("full_name") == (pr["base"].get("repo") or {}).get("full_name")
     for sha in git("rev-list", f"{base}..{head}").split():
         ident = "\n".join([git("log", "-1", "--format=%an <%ae> / %cn <%ce>", sha)] + credits.get(sha, []))
         if any(rx.search(ident) for _, rx in patterns):
             print(f"::warning::commit {sha[:10]}: author or committer identity matches a private pattern")
+        idents = [("author", git("log", "-1", "--format=%ae", sha).strip()),
+                  ("committer", git("log", "-1", "--format=%ce", sha).strip())]
+        for line in git("log", "-1", "--format=%B", sha).splitlines():
+            if re.match(r"^\s*(co-authored-by|signed-off-by):", line, re.I):
+                m = IDENTITY_LINE.search(line)
+                if m:
+                    idents.append(("co-author or sign-off line", m.group(1)))
+        for problem in identity_problems(idents, own_branch):
+            hits.append(f"commit {sha[:10]}: {problem}")
     for where, text in texts:
         for n, rx in patterns:
             if rx.search(text):
