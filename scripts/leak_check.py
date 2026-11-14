@@ -208,8 +208,9 @@ def main():
             else:
                 body.append(line)
         texts.append((f"commit {sha[:10]} message", "\n".join(body)))
-    for path in git("diff", "--name-only", f"{base}...{head}").splitlines():
-        texts.append(("file name", path))
+    # Numbered, so two matching names stay two places without printing either.
+    for i, path in enumerate(git("diff", "--name-only", f"{base}...{head}").splitlines(), 1):
+        texts.append((f"file name {i}", path))
     allow = load_allow(base)
 
     hits = []
