@@ -4,7 +4,9 @@
 The patterns come from the LEAK_PATTERNS secret (one Python regex per line,
 `#` comments allowed), so the list itself is never published. A hit is
 reported by pattern number and location only: printing the matched text
-would put it in a public Actions log.
+would put it in a public Actions log. On a pull request from a fork the
+pattern number is left out too, so the report is the location alone, and the
+number of patterns is never printed.
 
 Scanned: lines added by the change, file names, commit messages, and for a
 pull request its title and description. Co-authored-by and Signed-off-by
@@ -206,8 +208,9 @@ def main():
             else:
                 body.append(line)
         texts.append((f"commit {sha[:10]} message", "\n".join(body)))
-    for path in git("diff", "--name-only", f"{base}...{head}").splitlines():
-        texts.append(("file name", path))
+    # Numbered, so two matching names stay two places without printing either.
+    for i, path in enumerate(git("diff", "--name-only", f"{base}...{head}").splitlines(), 1):
+        texts.append((f"file name {i}", path))
     allow = load_allow(base)
 
     hits = []
@@ -217,6 +220,15 @@ def main():
     # own work, so its identities must be noreply ones; a fork's contributor
     # chooses their own address.
     own_branch = bool(pr) and (pr["head"].get("repo") or {}).get("full_name") == (pr["base"].get("repo") or {}).get("full_name")
+    # A fork's author can probe the list by trying strings and reading which
+    # rule answers, so a fork gets the location only. A head repository that
+    # is missing from the event counts as a fork.
+    from_fork = bool(pr) and not own_branch
+
+    def pattern_hit(n, prep, place):
+        if from_fork:
+            return f"{place} matches a private pattern"
+        return f"rule on line {n} of LEAK_PATTERNS, {prep} {place}"
     for sha in git("rev-list", f"{base}..{head}").split():
         ident = "\n".join([git("log", "-1", "--format=%an <%ae> / %cn <%ce>", sha)] + credits.get(sha, []))
         if any(rx.search(ident) for _, rx in patterns):
@@ -238,14 +250,14 @@ def main():
     for where, text in texts:
         for n, rx in patterns:
             if rx.search(text):
-                hits.append(f"rule on line {n} of LEAK_PATTERNS, in {where}")
+                hits.append(pattern_hit(n, "in", where))
     images = []
     for path, line_no, text in added_lines(base, head):
         if any(fnmatch.fnmatch(path, g) for g in allow):
             continue
         for n, rx in patterns:
             if rx.search(text):
-                hits.append(f"rule on line {n} of LEAK_PATTERNS, at {path}:{line_no}")
+                hits.append(pattern_hit(n, "at", f"{path}:{line_no}"))
     for path in git("diff", "--name-only", "--diff-filter=A", f"{base}...{head}").splitlines():
         if re.search(r"\.(png|jpe?g|gif|webp|heic|mp4|mov)$", path, re.I):
             images.append(path)
@@ -253,12 +265,15 @@ def main():
     for p in images:
         print(f"::warning file={p}::new image or video: check by eye that it shows only made-up data")
     if hits:
+        # One line per place for a fork: without rule numbers, several rules
+        # matching the same place would otherwise repeat it.
+        hits = list(dict.fromkeys(hits))
         for h in hits:
             print(f"::error::{h}")
         print(f"{len(hits)} private-context hit(s). The matched text is not printed (this log is public);"
               " look at the named places, take the private detail out (see the repo's CLAUDE.md), and push again.")
         return 1
-    print(f"No private context found ({len(patterns)} patterns, {len(texts)} texts checked).")
+    print(f"No private context found ({len(texts)} texts checked).")
     return 0
 
 

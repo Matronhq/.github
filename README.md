@@ -8,7 +8,9 @@ Shared GitHub configuration for Matron repositories.
 request or push when it adds private context: names, internal hosts,
 references to private systems. The patterns live in the organisation secret
 `LEAK_PATTERNS` (one Python regex per line), so the list is never published,
-and a hit is reported by rule number and location only.
+and a hit is reported by rule number and location only. A pull request from
+a fork gets the location alone, without the rule number, and the number of
+patterns is never printed.
 
 Use it from a repository with `caller-example.yml` (copy it to
 `.github/workflows/leak-check.yml`). Paths that may legitimately match can be
