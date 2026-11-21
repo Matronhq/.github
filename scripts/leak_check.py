@@ -129,13 +129,42 @@ def load_allow(ref=None, path=".leakcheck-allow"):
     return [l.strip() for l in text.splitlines() if l.strip() and not l.startswith("#")]
 
 
+C_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+
+
+def diff_path(spec):
+    """The new-side path from a `+++ ` header, or None for /dev/null. Git
+    C-quotes a name holding a non-ASCII byte, a quote, a backslash or a
+    control character (`"b/caf\\303\\251.md"`); such a file must still be
+    scanned, so the quoting is undone rather than the file skipped."""
+    if spec.startswith('"') and spec.endswith('"') and len(spec) >= 2:
+        raw, out, i = spec[1:-1], bytearray(), 0
+        while i < len(raw):
+            c = raw[i]
+            if c == "\\" and i + 1 < len(raw):
+                nxt = raw[i + 1]
+                if re.match(r"[0-7]{3}", raw[i + 1:i + 4]):
+                    out.append(int(raw[i + 1:i + 4], 8))
+                    i += 4
+                    continue
+                if nxt in C_ESCAPES:
+                    out.append(C_ESCAPES[nxt])
+                    i += 2
+                    continue
+            out += c.encode("utf-8")
+            i += 1
+        spec = out.decode("utf-8", errors="replace")
+    return spec[2:] if spec.startswith("b/") else None
+
+
 def added_lines(base, head):
     """(path, line_no, text) for every line the change adds."""
     diff = git("diff", "--no-color", "--unified=0", "--no-ext-diff", f"{base}...{head}")
     path, line_no = None, 0
     for line in diff.splitlines():
         if line.startswith("+++ "):
-            path = line[6:] if line.startswith("+++ b/") else None
+            # Git ends the header with a tab when the name holds a space.
+            path = diff_path(line[4:].removesuffix("\t"))
         elif line.startswith("@@"):
             m = re.search(r"\+(\d+)", line)
             line_no = int(m.group(1)) if m else 0
@@ -226,6 +255,9 @@ def main():
     from_fork = bool(pr) and not own_branch
 
     def pattern_hit(n, prep, place):
+        # A decoded file name can hold a newline; printed raw, the next line
+        # would be read as a workflow command.
+        place = re.sub(r"[\x00-\x1f\x7f]", lambda m: f"\\x{ord(m.group()):02x}", place)
         if from_fork:
             return f"{place} matches a private pattern"
         return f"rule on line {n} of LEAK_PATTERNS, {prep} {place}"
